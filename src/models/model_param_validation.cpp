@@ -99,8 +99,13 @@ void validate_model_params_before_load(const Config& config,
         throw std::invalid_argument("validate_model_params_before_load: vocab_size must be > 0.");
     }
 
-    const int head_dim = config.hidden_size / config.num_heads;
-    const int kv_hidden_size = config.num_heads_kv * head_dim;
+    const int effective_head_dim =
+        config.head_dim > 0 ? config.head_dim : (config.hidden_size / config.num_heads);
+    if (effective_head_dim <= 0) {
+        throw std::invalid_argument("validate_model_params_before_load: effective head_dim must be > 0.");
+    }
+    const int q_hidden_size = config.num_heads * effective_head_dim;
+    const int kv_hidden_size = config.num_heads_kv * effective_head_dim;
 
     const std::string embed_weight_key = "model.embed_tokens.weight";
     const std::string model_norm_weight_key = key_prefix.model_norm() + ".weight";
@@ -115,6 +120,8 @@ void validate_model_params_before_load(const Config& config,
         std::string k_proj_weight;
         std::string v_proj_weight;
         std::string o_proj_weight;
+        std::string q_norm_weight;
+        std::string k_norm_weight;
         std::string input_norm_weight;
         std::string down_proj_weight;
         std::string gate_proj_weight;
@@ -131,6 +138,8 @@ void validate_model_params_before_load(const Config& config,
             key_prefix.self_attn_k_proj(layer_key) + ".weight",
             key_prefix.self_attn_v_proj(layer_key) + ".weight",
             key_prefix.self_attn_o_proj(layer_key) + ".weight",
+            key_prefix.self_attn_q_norm(layer_key) + ".weight",
+            key_prefix.self_attn_k_norm(layer_key) + ".weight",
             key_prefix.input_layer_norm(layer_key) + ".weight",
             key_prefix.mlp_down_proj(layer_key) + ".weight",
             key_prefix.mlp_gate_proj(layer_key) + ".weight",
@@ -141,6 +150,10 @@ void validate_model_params_before_load(const Config& config,
         require_key(model_param, keys.k_proj_weight, missing_keys);
         require_key(model_param, keys.v_proj_weight, missing_keys);
         require_key(model_param, keys.o_proj_weight, missing_keys);
+        if (key_prefix.uses_qk_norm()) {
+            require_key(model_param, keys.q_norm_weight, missing_keys);
+            require_key(model_param, keys.k_norm_weight, missing_keys);
+        }
         require_key(model_param, keys.input_norm_weight, missing_keys);
         require_key(model_param, keys.down_proj_weight, missing_keys);
         require_key(model_param, keys.gate_proj_weight, missing_keys);
@@ -157,10 +170,14 @@ void validate_model_params_before_load(const Config& config,
     expect_vector_shape(model_param.peek_param(model_norm_weight_key), model_norm_weight_key, config.hidden_size);
 
     for (const auto& keys : layer_keys) {
-        expect_matrix_shape(model_param.peek_param(keys.q_proj_weight), keys.q_proj_weight, config.hidden_size, config.hidden_size);
+        expect_matrix_shape(model_param.peek_param(keys.q_proj_weight), keys.q_proj_weight, q_hidden_size, config.hidden_size);
         expect_matrix_shape(model_param.peek_param(keys.k_proj_weight), keys.k_proj_weight, kv_hidden_size, config.hidden_size);
         expect_matrix_shape(model_param.peek_param(keys.v_proj_weight), keys.v_proj_weight, kv_hidden_size, config.hidden_size);
-        expect_matrix_shape(model_param.peek_param(keys.o_proj_weight), keys.o_proj_weight, config.hidden_size, config.hidden_size);
+        expect_matrix_shape(model_param.peek_param(keys.o_proj_weight), keys.o_proj_weight, config.hidden_size, q_hidden_size);
+        if (key_prefix.uses_qk_norm()) {
+            expect_vector_shape(model_param.peek_param(keys.q_norm_weight), keys.q_norm_weight, effective_head_dim);
+            expect_vector_shape(model_param.peek_param(keys.k_norm_weight), keys.k_norm_weight, effective_head_dim);
+        }
         expect_vector_shape(model_param.peek_param(keys.input_norm_weight), keys.input_norm_weight, config.hidden_size);
         expect_vector_shape(model_param.peek_param(keys.post_attn_norm_weight), keys.post_attn_norm_weight, config.hidden_size);
 

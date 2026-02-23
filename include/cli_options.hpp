@@ -7,6 +7,7 @@
 namespace easy_llm {
 
 struct CliOptions {
+    std::string model_dir;
     std::string prompt_file;
     std::string prompt;
     int max_steps{100};

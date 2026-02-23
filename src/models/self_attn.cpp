@@ -162,6 +162,10 @@ SelfAttn::SelfAttn(int hidden_dim, int num_heads)
 }
 
 void SelfAttn::load_param(const LayerKeyPrefix& key_prefix, const std::string& key, ModelParam& model_param) {
+    use_qk_norm_ = false;
+#ifdef USE_CUDA
+    cuda_supported_ = true;
+#endif
     q_proj_.load_param(key_prefix.self_attn_q_proj(key), model_param);
     k_proj_.load_param(key_prefix.self_attn_k_proj(key), model_param);
     v_proj_.load_param(key_prefix.self_attn_v_proj(key), model_param);
@@ -173,6 +177,33 @@ void SelfAttn::load_param(const LayerKeyPrefix& key_prefix, const std::string& k
     }
     head_dim_ = hidden_dim_ / num_heads_;
     norm_.load_param(key_prefix.input_layer_norm(key), model_param);
+
+    const std::string q_norm_key = key_prefix.self_attn_q_norm(key);
+    const std::string k_norm_key = key_prefix.self_attn_k_norm(key);
+    const bool has_q_norm = model_param.contains(q_norm_key + ".weight");
+    const bool has_k_norm = model_param.contains(k_norm_key + ".weight");
+
+    if (key_prefix.uses_qk_norm()) {
+        if (!has_q_norm || !has_k_norm) {
+            throw std::runtime_error("QK-Norm is required but missing weights under key: " + key);
+        }
+        q_norm_.load_param(q_norm_key, model_param);
+        k_norm_.load_param(k_norm_key, model_param);
+        use_qk_norm_ = true;
+    } else if (has_q_norm && has_k_norm) {
+        q_norm_.load_param(q_norm_key, model_param);
+        k_norm_.load_param(k_norm_key, model_param);
+        use_qk_norm_ = true;
+    } else if (has_q_norm != has_k_norm) {
+        throw std::runtime_error("QK-Norm weights are partially present under key: " + key);
+    }
+
+#ifdef USE_CUDA
+    if (use_qk_norm_) {
+        cuda_supported_ = false;
+        spdlog::warn("SelfAttn CUDA disabled for layer '{}' because QK-Norm is enabled.", key);
+    }
+#endif
 }
 
 Tensor SelfAttn::forward(const Tensor& input, const std::vector<int>& sample_ids, const std::vector<int>* pos_offsets) {
@@ -188,7 +219,7 @@ Tensor SelfAttn::forward(const Tensor& input, const std::vector<int>& sample_ids
     compute_offsets(ctx);
 
 #ifdef USE_CUDA
-    if (cuda_enabled_ && ::easy_llm::cuda::available()) {
+    if (cuda_enabled_ && cuda_supported_ && ::easy_llm::cuda::available()) {
         try {
             auto output = forward_cuda(input, sample_ids, ctx.offsets);
             return output;
@@ -228,6 +259,10 @@ Tensor SelfAttn::forward_cpu(const Tensor& input, const std::vector<int>& sample
     q.split_head(num_heads_).transpose(1, 2);  // [batch, num_head, seq, head_dim]
     k.split_head(num_heads_kv_).transpose(1, 2);  // [batch, num_head_kv, seq, head_dim]
     v.split_head(num_heads_kv_).transpose(1, 2);  // [batch, num_head_kv, seq, head_dim]
+    if (use_qk_norm_) {
+        q = q_norm_.forward(q);
+        k = k_norm_.forward(k);
+    }
     validate_tensor_size(q, "q");
     validate_tensor_size(k, "k");
     validate_tensor_size(v, "v");
@@ -253,8 +288,8 @@ Tensor SelfAttn::forward_cpu(const Tensor& input, const std::vector<int>& sample
     scores.scale_inplace(1.0f / std::sqrt(head_dim_));  // scale scores
     auto attention = scores.softmax();
     auto attn_output = ops::matmul_4d(attention, cache_v_batch.cache);  // [batch, num_head, seq, head_dim]
-    auto input_shape = input.shape();
-    attn_output.transpose(1, 2).reshape(input_shape);
+    const auto input_shape = input.shape();
+    attn_output.transpose(1, 2).reshape({input_shape[0], input_shape[1], hidden_dim_});
     auto output = o_proj_.forward(attn_output);
     return output;
 }
@@ -348,7 +383,7 @@ void SelfAttn::init_kv_cache(int batch_size) {
         cuda_state_ = std::make_unique<cuda::ops::SelfAttnCudaState>();
     }
     cuda_state_->init_kv_cache(batch_size);
-    cuda_enabled_ = true;
+    cuda_enabled_ = cuda_supported_;
 #endif
 }
 
@@ -422,10 +457,19 @@ void SelfAttn::set_pad_lens(const std::vector<int>& pad_lens) {
 
 void SelfAttn::set_cuda_enabled(bool enabled) {
 #ifdef USE_CUDA
-    cuda_enabled_ = enabled;
-    if (!enabled && cuda_state_) {
-        cuda_state_->reset_kv_cache();
+    if (!enabled) {
+        cuda_enabled_ = false;
+        if (cuda_state_) {
+            cuda_state_->reset_kv_cache();
+        }
+        return;
     }
+    if (!cuda_supported_) {
+        cuda_enabled_ = false;
+        spdlog::warn("SelfAttn CUDA request ignored because this layer is CPU-only.");
+        return;
+    }
+    cuda_enabled_ = true;
 #else
     (void)enabled;
 #endif

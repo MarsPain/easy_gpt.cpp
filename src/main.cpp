@@ -55,6 +55,13 @@ int main(int argc, char** argv) {
     }
 
     auto config = make_unique<easy_llm::Config>();
+    if (!options.model_dir.empty()) {
+        const std::filesystem::path model_dir = options.model_dir;
+        config->model_config_path = (model_dir / "config.json").string();
+        config->model_path = (model_dir / "model.safetensors").string();
+        config->tokenizer_path = (model_dir / "tokenizer.json").string();
+        config->tokenizer_config_path = (model_dir / "tokenizer_config.json").string();
+    }
     config->load_config();
     config->max_steps = options.max_steps;
     config->temperature = options.temperature;

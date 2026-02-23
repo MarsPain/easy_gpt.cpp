@@ -11,6 +11,7 @@ struct Config {
     int num_layers{0};
     int num_heads{0};
     int num_heads_kv{0};
+    int head_dim{0};
     int hidden_size{0};
     int vocab_size{0};
     int max_len{0};
@@ -20,6 +21,7 @@ struct Config {
     int bos_token_id{-1};
     int eos_token_id{-1};
     float rope_theta{0.0f};
+    bool attention_bias{true};
     float temperature{1.0f};
     float top_p{1.0f};
     int top_k{0};

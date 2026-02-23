@@ -42,6 +42,26 @@ int run_valid_case() {
     return 0;
 }
 
+int run_model_dir_case() {
+    easy_llm::CliOptions options;
+    std::string error;
+    const char* argv[] = {
+        "easy_llm",
+        "--model-dir",
+        "/tmp/qwen3"
+    };
+    const int argc = static_cast<int>(sizeof(argv) / sizeof(argv[0]));
+    if (!easy_llm::parse_args(argc, const_cast<char**>(argv), &options, &error)) {
+        std::cerr << "FAIL: --model-dir should parse, error=" << error << "\n";
+        return 1;
+    }
+    if (options.model_dir != "/tmp/qwen3") {
+        std::cerr << "FAIL: --model-dir parsed value mismatch\n";
+        return 1;
+    }
+    return 0;
+}
+
 int run_invalid_case() {
     easy_llm::CliOptions options;
     std::string error;
@@ -66,6 +86,9 @@ int run_invalid_case() {
 
 int main() {
     if (run_valid_case() != 0) {
+        return 1;
+    }
+    if (run_model_dir_case() != 0) {
         return 1;
     }
     if (run_invalid_case() != 0) {

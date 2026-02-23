@@ -198,6 +198,19 @@ easy_llm::Config make_test_config() {
     return config;
 }
 
+easy_llm::Config make_qwen3_test_config() {
+    easy_llm::Config config;
+    config.num_layers = 1;
+    config.hidden_size = 8;
+    config.num_heads = 2;
+    config.num_heads_kv = 1;
+    config.head_dim = 6;
+    config.vocab_size = 12;
+    config.architecture = "Qwen3ForCausalLM";
+    config.model_type = "qwen3";
+    return config;
+}
+
 std::vector<TensorSpec> make_complete_specs() {
     return {
         {"model.embed_tokens.weight", {10, 4}, 1.0f},
@@ -214,6 +227,24 @@ std::vector<TensorSpec> make_complete_specs() {
     };
 }
 
+std::vector<TensorSpec> make_qwen3_specs() {
+    return {
+        {"model.embed_tokens.weight", {12, 8}, 1.0f},
+        {"model.layers.0.self_attn.q_proj.weight", {12, 8}, 2.0f},
+        {"model.layers.0.self_attn.k_proj.weight", {6, 8}, 3.0f},
+        {"model.layers.0.self_attn.v_proj.weight", {6, 8}, 4.0f},
+        {"model.layers.0.self_attn.o_proj.weight", {8, 12}, 5.0f},
+        {"model.layers.0.self_attn.q_norm.weight", {6}, 5.5f},
+        {"model.layers.0.self_attn.k_norm.weight", {6}, 5.8f},
+        {"model.layers.0.input_layernorm.weight", {8}, 6.0f},
+        {"model.layers.0.mlp.down_proj.weight", {8, 16}, 7.0f},
+        {"model.layers.0.mlp.gate_proj.weight", {16, 8}, 8.0f},
+        {"model.layers.0.mlp.up_proj.weight", {16, 8}, 9.0f},
+        {"model.layers.0.post_attention_layernorm.weight", {8}, 10.0f},
+        {"model.norm.weight", {8}, 11.0f}
+    };
+}
+
 void consume_required_weights(const easy_llm::Config& config,
                               const easy_llm::LayerKeyPrefix& key_prefix,
                               easy_llm::ModelParam& model_param) {
@@ -224,6 +255,10 @@ void consume_required_weights(const easy_llm::Config& config,
         (void)model_param.take_param(key_prefix.self_attn_k_proj(layer_key) + ".weight");
         (void)model_param.take_param(key_prefix.self_attn_v_proj(layer_key) + ".weight");
         (void)model_param.take_param(key_prefix.self_attn_o_proj(layer_key) + ".weight");
+        if (key_prefix.uses_qk_norm()) {
+            (void)model_param.take_param(key_prefix.self_attn_q_norm(layer_key) + ".weight");
+            (void)model_param.take_param(key_prefix.self_attn_k_norm(layer_key) + ".weight");
+        }
         (void)model_param.take_param(key_prefix.input_layer_norm(layer_key) + ".weight");
         (void)model_param.take_param(key_prefix.mlp_down_proj(layer_key) + ".weight");
         (void)model_param.take_param(key_prefix.mlp_gate_proj(layer_key) + ".weight");
@@ -387,6 +422,40 @@ bool run_validation_bad_shape_case() {
     }, "validation bad shape");
 }
 
+bool run_qwen3_validation_success_case() {
+    auto specs = make_qwen3_specs();
+    std::filesystem::path path = write_safetensors_fixture("easy_llm_model_param_qwen3_valid.safetensors", specs);
+    auto model_param = easy_llm::ModelParam::load(path.string());
+    auto config = make_qwen3_test_config();
+    auto key_prefix = easy_llm::create_layer_key_prefix(config);
+    easy_llm::validate_model_params_before_load(config, *key_prefix, *model_param);
+    return true;
+}
+
+bool run_qwen3_validation_missing_qk_norm_case() {
+    auto specs = make_qwen3_specs();
+    specs.erase(specs.begin() + 5); // remove q_norm
+    std::filesystem::path path = write_safetensors_fixture("easy_llm_model_param_qwen3_missing_qnorm.safetensors", specs);
+    auto model_param = easy_llm::ModelParam::load(path.string());
+    auto config = make_qwen3_test_config();
+    auto key_prefix = easy_llm::create_layer_key_prefix(config);
+    return expect_throws<std::invalid_argument>([&]() {
+        easy_llm::validate_model_params_before_load(config, *key_prefix, *model_param);
+    }, "qwen3 validation missing q_norm");
+}
+
+bool run_qwen3_validation_bad_o_proj_shape_case() {
+    auto specs = make_qwen3_specs();
+    specs[4].shape = {8, 8}; // should be [hidden_size, num_heads * head_dim]
+    std::filesystem::path path = write_safetensors_fixture("easy_llm_model_param_qwen3_bad_o_proj.safetensors", specs);
+    auto model_param = easy_llm::ModelParam::load(path.string());
+    auto config = make_qwen3_test_config();
+    auto key_prefix = easy_llm::create_layer_key_prefix(config);
+    return expect_throws<std::invalid_argument>([&]() {
+        easy_llm::validate_model_params_before_load(config, *key_prefix, *model_param);
+    }, "qwen3 validation bad o_proj shape");
+}
+
 bool run_remaining_keys_success_case() {
     auto specs = make_complete_specs();
     std::filesystem::path path = write_safetensors_fixture("easy_llm_model_param_remaining_ok.safetensors", specs);
@@ -450,6 +519,15 @@ int main() {
         return 1;
     }
     if (!run_validation_bad_shape_case()) {
+        return 1;
+    }
+    if (!run_qwen3_validation_success_case()) {
+        return 1;
+    }
+    if (!run_qwen3_validation_missing_qk_norm_case()) {
+        return 1;
+    }
+    if (!run_qwen3_validation_bad_o_proj_shape_case()) {
         return 1;
     }
     if (!run_remaining_keys_success_case()) {

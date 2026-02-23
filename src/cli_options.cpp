@@ -21,10 +21,11 @@ std::string trim(const std::string& text) {
 }  // namespace
 
 void print_usage(std::ostream& os) {
-    os << "Usage: easy_llm [--prompt-file <path>] [--max-steps <n>]\n"
+    os << "Usage: easy_llm [--model-dir <path>] [--prompt-file <path>] [--max-steps <n>]\n"
           "                [--temperature <float>] [--top-p <float>] [--top-k <int>] [--seed <int>] [--greedy]\n"
           "                [--serve] [--serve-max-active <n>] [--serve-prefill-batch <n>] [--serve-idle-ms <n>] [--serve-stats-ms <n>]\n"
           "                [\"prompt\"]\n"
+       << "      --model-dir <path>    Override model directory containing config/model/tokenizer files\n"
        << "  -f, --prompt-file <path>  Read prompts from file (one per line, ignore empty lines)\n"
        << "  -m, --max-steps <n>        Maximum generation steps per request (default: 100)\n"
        << "      --temperature <float> Sampling temperature (default: 0.8)\n"
@@ -39,6 +40,7 @@ void print_usage(std::ostream& os) {
        << "      --serve-stats-ms <n>   Service stats log interval in milliseconds, 0 disables periodic logs (default: 1000)\n"
        << "  -h, --help                Show this help message\n"
        << "Examples:\n"
+       << "  ./build/easy_llm --model-dir model/Qwen3-0.6B --max-steps 128 \"Hello\"\n"
        << "  ./build/easy_llm --max-steps 128 \"Hello\"\n"
        << "  ./build/easy_llm --temperature 0.7 --top-p 0.9 --top-k 40 \"Hello\"\n"
        << "  ./build/easy_llm --greedy \"Hello\"\n"
@@ -100,6 +102,18 @@ bool parse_args(int argc, char** argv, CliOptions* options, std::string* error) 
                 return false;
             }
             options->prompt_file = argv[++i];
+            continue;
+        }
+        if (arg == "--model-dir") {
+            if (i + 1 >= argc) {
+                *error = "Missing path after " + arg;
+                return false;
+            }
+            if (!options->model_dir.empty()) {
+                *error = "Model dir option specified multiple times";
+                return false;
+            }
+            options->model_dir = argv[++i];
             continue;
         }
         if (arg == "-m" || arg == "--max-steps") {

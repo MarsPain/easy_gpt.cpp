@@ -7,6 +7,7 @@
 #include <unordered_set>
 #include <cctype>
 #include <algorithm>
+#include <stdexcept>
 
 #include "spdlog/spdlog.h"
 #include "json.hpp"
@@ -98,6 +99,29 @@ private:
     bool suppress_prefix_next_{false};
 };
 
+std::vector<std::string> parse_token_merges(const nlohmann::json& tokenizer_config) {
+    if (!tokenizer_config.contains("model") || !tokenizer_config["model"].is_object() ||
+        !tokenizer_config["model"].contains("merges") || !tokenizer_config["model"]["merges"].is_array()) {
+        throw std::runtime_error("Tokenizer JSON missing model.merges array.");
+    }
+    std::vector<std::string> token_merges;
+    const auto& merges = tokenizer_config["model"]["merges"];
+    token_merges.reserve(merges.size());
+    for (std::size_t i = 0; i < merges.size(); ++i) {
+        const auto& merge = merges[i];
+        if (merge.is_string()) {
+            token_merges.push_back(merge.get<std::string>());
+            continue;
+        }
+        if (merge.is_array() && merge.size() == 2 && merge[0].is_string() && merge[1].is_string()) {
+            token_merges.push_back(merge[0].get<std::string>() + " " + merge[1].get<std::string>());
+            continue;
+        }
+        throw std::runtime_error("Unsupported merge format at tokenizer model.merges[" + std::to_string(i) + "].");
+    }
+    return token_merges;
+}
+
 } // namespace
 
 std::unique_ptr<Tokenizer> Tokenizer::create(const Config& config) {
@@ -159,7 +183,7 @@ vector<string> Tokenizer::ids_to_tokens(const vector<int>& ids) const {
 
 void Tokenizer::init_tokenizer_config(const string& tokenizer_path) {
     tokenizer_config_ = utils::load_json(tokenizer_path);
-    token_merges_ = tokenizer_config_["model"]["merges"];
+    token_merges_ = parse_token_merges(tokenizer_config_);
     spdlog::debug("size of token_merges: {}", token_merges_.size());
     bpe_ = std::make_unique<Bpe>(token_merges_);
     token2id_ = tokenizer_config_["model"]["vocab"];
@@ -241,7 +265,18 @@ void Tokenizer::register_added_tokens(const std::vector<AddedTokenInfo>& added_t
 }
 
 bool Tokenizer::parse_pad_id(const nlohmann::json& tokenizer_config) {
-    std::string pad_token = tokenizer_config.value("pad_token", "");
+    std::string pad_token;
+    if (tokenizer_config.contains("pad_token")) {
+        const auto& pad_token_json = tokenizer_config["pad_token"];
+        if (pad_token_json.is_string()) {
+            pad_token = pad_token_json.get<std::string>();
+        } else if (pad_token_json.is_object() && pad_token_json.contains("content") &&
+                   pad_token_json["content"].is_string()) {
+            pad_token = pad_token_json["content"].get<std::string>();
+        } else {
+            spdlog::warn("pad_token has unsupported json type in tokenizer_config.json");
+        }
+    }
     if (pad_token.empty()) {
         spdlog::warn("pad_token not found in tokenizer_config.json");
         return false;
