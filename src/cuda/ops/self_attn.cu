@@ -169,6 +169,8 @@ struct ForwardShapeInfo {
 
 struct ForwardDeviceResources {
     const void* d_norm_weight{nullptr};
+    const void* d_q_norm_weight{nullptr};
+    const void* d_k_norm_weight{nullptr};
     const void* q_weight_ptr{nullptr};
     const void* k_weight_ptr{nullptr};
     const void* v_weight_ptr{nullptr};
@@ -200,6 +202,8 @@ ForwardShapeInfo validate_forward_shape_and_state(const Tensor& input,
                                                   const std::vector<int>& offsets,
                                                   const SelfAttnCudaParams& params,
                                                   const Tensor& norm_weight,
+                                                  const Tensor& q_norm_weight,
+                                                  const Tensor& k_norm_weight,
                                                   const Tensor& q_weight,
                                                   const Tensor& q_bias,
                                                   const Tensor& k_weight,
@@ -215,9 +219,6 @@ ForwardShapeInfo validate_forward_shape_and_state(const Tensor& input,
     }
     if (params.num_heads % params.num_heads_kv != 0) {
         throw std::invalid_argument("self_attn_forward_cuda: num_heads must be divisible by num_heads_kv.");
-    }
-    if (params.num_heads * params.head_dim != params.hidden_dim) {
-        throw std::invalid_argument("self_attn_forward_cuda: hidden_dim mismatch with num_heads * head_dim.");
     }
     if (input.shape().size() != 3) {
         throw std::invalid_argument("self_attn_forward_cuda: input must be [batch, seq, hidden].");
@@ -247,6 +248,13 @@ ForwardShapeInfo validate_forward_shape_and_state(const Tensor& input,
     if (norm_weight.size() != shape.hidden_dim) {
         throw std::invalid_argument("self_attn_forward_cuda: norm_weight size mismatch.");
     }
+    if (params.use_qk_norm) {
+        validate_vector_like(q_norm_weight, "q_norm_weight");
+        validate_vector_like(k_norm_weight, "k_norm_weight");
+        if (q_norm_weight.size() != params.head_dim || k_norm_weight.size() != params.head_dim) {
+            throw std::invalid_argument("self_attn_forward_cuda: q/k norm weight size mismatch.");
+        }
+    }
     validate_linear_weight(q_weight, "q_weight");
     validate_linear_weight(k_weight, "k_weight");
     validate_linear_weight(v_weight, "v_weight");
@@ -264,14 +272,15 @@ ForwardShapeInfo validate_forward_shape_and_state(const Tensor& input,
     if (q_weight.shape()[1] != shape.hidden_dim || k_weight.shape()[1] != shape.hidden_dim || v_weight.shape()[1] != shape.hidden_dim) {
         throw std::invalid_argument("self_attn_forward_cuda: q/k/v weight input dim mismatch.");
     }
-    if (shape.q_out_dim != params.hidden_dim) {
+    const int q_hidden_dim = params.num_heads * params.head_dim;
+    if (shape.q_out_dim != q_hidden_dim) {
         throw std::invalid_argument("self_attn_forward_cuda: q_weight output dim mismatch.");
     }
     if (shape.k_out_dim != params.num_heads_kv * params.head_dim ||
         shape.v_out_dim != params.num_heads_kv * params.head_dim) {
         throw std::invalid_argument("self_attn_forward_cuda: k/v weight output dim mismatch.");
     }
-    if (o_weight.shape()[1] != params.hidden_dim || shape.o_out_dim != params.hidden_dim) {
+    if (o_weight.shape()[1] != shape.q_out_dim || shape.o_out_dim != shape.hidden_dim) {
         throw std::invalid_argument("self_attn_forward_cuda: o_weight shape mismatch.");
     }
     if (params.head_dim % 2 != 0) {
@@ -300,9 +309,12 @@ template <typename Traits>
 ForwardDeviceResources prepare_forward_device_resources(CudaContext& ctx,
                                                         SelfAttnCudaState::Impl& impl,
                                                         ForwardScratchBuffers& scratch,
+                                                        const SelfAttnCudaParams& params,
                                                         const ForwardShapeInfo& shape,
                                                         const Tensor& input,
                                                         const Tensor& norm_weight,
+                                                        const Tensor& q_norm_weight,
+                                                        const Tensor& k_norm_weight,
                                                         const Tensor& q_weight,
                                                         const Tensor& q_bias,
                                                         const Tensor& k_weight,
@@ -327,6 +339,12 @@ ForwardDeviceResources prepare_forward_device_resources(CudaContext& ctx,
 
     resources.d_norm_weight = get_or_upload_tensor<Traits>(
         norm_weight, impl.norm_weight_cache, stream, "cudaMemcpyAsync norm_weight");
+    if (params.use_qk_norm) {
+        resources.d_q_norm_weight = get_or_upload_tensor<Traits>(
+            q_norm_weight, impl.q_norm_weight_cache, stream, "cudaMemcpyAsync q_norm_weight");
+        resources.d_k_norm_weight = get_or_upload_tensor<Traits>(
+            k_norm_weight, impl.k_norm_weight_cache, stream, "cudaMemcpyAsync k_norm_weight");
+    }
 
     ensure_device_buffer(scratch.norm_out, input_bytes, scratch_realloc_counter);
     rms_norm_kernel<DeviceType><<<shape.rows, kThreads, kThreads * sizeof(float), stream>>>(
@@ -376,6 +394,32 @@ void apply_qkv_projection_biases(cudaStream_t stream,
     maybe_add_bias<Traits>(stream, scratch.q_proj.data(), resources.d_q_bias, shape.rows, shape.q_out_dim);
     maybe_add_bias<Traits>(stream, scratch.k_proj.data(), resources.d_k_bias, shape.rows, shape.k_out_dim);
     maybe_add_bias<Traits>(stream, scratch.v_proj.data(), resources.d_v_bias, shape.rows, shape.v_out_dim);
+}
+
+template <typename Traits>
+void apply_qk_norm_if_enabled(cudaStream_t stream,
+                              ForwardScratchBuffers& scratch,
+                              const SelfAttnCudaParams& params,
+                              const ForwardShapeInfo& shape,
+                              const ForwardDeviceResources& resources) {
+    if (!params.use_qk_norm) {
+        return;
+    }
+    using DeviceType = typename Traits::DeviceType;
+    constexpr int kThreads = 256;
+    const int q_vectors = shape.batch * params.num_heads * shape.seq_len;
+    const int k_vectors = shape.batch * params.num_heads_kv * shape.seq_len;
+    rms_norm_kernel<DeviceType><<<q_vectors, kThreads, kThreads * sizeof(float), stream>>>(
+        static_cast<const DeviceType*>(scratch.q.data()),
+        static_cast<const DeviceType*>(resources.d_q_norm_weight),
+        static_cast<DeviceType*>(scratch.q.data()),
+        q_vectors, params.head_dim, 1e-6f);
+    rms_norm_kernel<DeviceType><<<k_vectors, kThreads, kThreads * sizeof(float), stream>>>(
+        static_cast<const DeviceType*>(scratch.k.data()),
+        static_cast<const DeviceType*>(resources.d_k_norm_weight),
+        static_cast<DeviceType*>(scratch.k.data()),
+        k_vectors, params.head_dim, 1e-6f);
+    cuda_check(cudaGetLastError(), "rms_norm_kernel qk");
 }
 
 void upload_offsets_to_device(ForwardScratchBuffers& scratch,
@@ -475,6 +519,7 @@ void prepare_decode_qkv(SelfAttnCudaState::Impl& impl,
         static_cast<DeviceType*>(scratch.v.data()),
         shape.batch, params.num_heads_kv, params.head_dim);
     cuda_check(cudaGetLastError(), "split_transpose_seq1_kernel");
+    apply_qk_norm_if_enabled<Traits>(stream, scratch, params, shape, resources);
 
     upload_offsets_to_device(scratch, offsets, shape.batch, stream, scratch_realloc_counter);
     ensure_rope_inv_freq_device(impl, params.head_dim, params.rope_theta, stream, scratch_realloc_counter);
@@ -531,6 +576,7 @@ void prepare_prefill_qkv(SelfAttnCudaState::Impl& impl,
         static_cast<DeviceType*>(scratch.v.data()),
         shape.batch, shape.seq_len, params.num_heads_kv, params.head_dim);
     cuda_check(cudaGetLastError(), "split_transpose_kernel");
+    apply_qk_norm_if_enabled<Traits>(stream, scratch, params, shape, resources);
 
     upload_offsets_to_device(scratch, offsets, shape.batch, stream, scratch_realloc_counter);
     ensure_rope_inv_freq_device(impl, params.head_dim, params.rope_theta, stream, scratch_realloc_counter);
@@ -678,7 +724,7 @@ void launch_decode_attention_pipeline(cublasHandle_t handle,
                                      params.num_heads,
                                      params.head_dim,
                                      shape.rows,
-                                     shape.hidden_dim,
+                                     shape.q_out_dim,
                                      shape.o_out_dim,
                                      resources.o_weight_ptr,
                                      resources.d_o_bias,
@@ -756,7 +802,7 @@ Tensor run_decode_seq1_path(SelfAttnCudaState::Impl& impl,
             sample_id,
             params.num_heads,
             params.head_dim,
-            shape.hidden_dim,
+            shape.q_out_dim,
             shape.q_out_dim,
             shape.k_out_dim,
             shape.v_out_dim,
@@ -764,10 +810,13 @@ Tensor run_decode_seq1_path(SelfAttnCudaState::Impl& impl,
             shape.repeat_factor,
             decode_resources.score_capacity,
             decode_resources.mask_inputs.pad_size,
+            params.use_qk_norm,
             decode_resources.cache_k_ptr,
             decode_resources.cache_v_ptr,
             decode_resources.mask_inputs.d_pad_ptr,
             resources.d_norm_weight,
+            resources.d_q_norm_weight,
+            resources.d_k_norm_weight,
             resources.q_weight_ptr,
             resources.k_weight_ptr,
             resources.v_weight_ptr,
@@ -800,7 +849,7 @@ Tensor run_decode_seq1_path(SelfAttnCudaState::Impl& impl,
                 sample_id,
                 params.num_heads,
                 params.head_dim,
-                shape.hidden_dim,
+                shape.q_out_dim,
                 shape.q_out_dim,
                 shape.k_out_dim,
                 shape.v_out_dim,
@@ -808,10 +857,13 @@ Tensor run_decode_seq1_path(SelfAttnCudaState::Impl& impl,
                 shape.repeat_factor,
                 decode_resources.score_capacity,
                 decode_resources.mask_inputs.pad_size,
+                params.use_qk_norm,
                 decode_resources.cache_k_ptr,
                 decode_resources.cache_v_ptr,
                 decode_resources.mask_inputs.d_pad_ptr,
                 resources.d_norm_weight,
+                resources.d_q_norm_weight,
+                resources.d_k_norm_weight,
                 resources.q_weight_ptr,
                 resources.k_weight_ptr,
                 resources.v_weight_ptr,
@@ -963,7 +1015,7 @@ Tensor run_prefill_path(SelfAttnCudaState::Impl& impl,
                                      params.num_heads,
                                      params.head_dim,
                                      shape.rows,
-                                     shape.hidden_dim,
+                                     shape.q_out_dim,
                                      shape.o_out_dim,
                                      resources.o_weight_ptr,
                                      resources.d_o_bias,
@@ -987,6 +1039,8 @@ Tensor self_attn_forward_cuda(const Tensor& input,
                               const std::vector<int>& pad_lens_by_sample,
                               const SelfAttnCudaParams& params,
                               const Tensor& norm_weight,
+                              const Tensor& q_norm_weight,
+                              const Tensor& k_norm_weight,
                               const Tensor& q_weight, const Tensor& q_bias,
                               const Tensor& k_weight, const Tensor& k_bias,
                               const Tensor& v_weight, const Tensor& v_bias,
@@ -999,6 +1053,8 @@ Tensor self_attn_forward_cuda(const Tensor& input,
                                                                     offsets,
                                                                     params,
                                                                     norm_weight,
+                                                                    q_norm_weight,
+                                                                    k_norm_weight,
                                                                     q_weight,
                                                                     q_bias,
                                                                     k_weight,
@@ -1024,9 +1080,12 @@ Tensor self_attn_forward_cuda(const Tensor& input,
         ctx,
         impl,
         scratch,
+        params,
         shape,
         input,
         norm_weight,
+        q_norm_weight,
+        k_norm_weight,
         q_weight,
         q_bias,
         k_weight,

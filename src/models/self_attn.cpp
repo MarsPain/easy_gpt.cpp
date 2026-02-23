@@ -153,7 +153,7 @@ SelfAttn::SelfAttn(const Config& config) {
 }
 
 SelfAttn::SelfAttn(int hidden_dim, int num_heads)
-    : hidden_dim_(hidden_dim), num_heads_(num_heads),
+    : hidden_dim_(hidden_dim), input_hidden_dim_(hidden_dim), num_heads_(num_heads),
       head_dim_(hidden_dim / num_heads),
       q_proj_(hidden_dim, hidden_dim),
       k_proj_(hidden_dim, hidden_dim),
@@ -171,6 +171,7 @@ void SelfAttn::load_param(const LayerKeyPrefix& key_prefix, const std::string& k
     v_proj_.load_param(key_prefix.self_attn_v_proj(key), model_param);
     o_proj_.load_param(key_prefix.self_attn_o_proj(key), model_param);
     hidden_dim_ = q_proj_.get_out_dim();
+    input_hidden_dim_ = q_proj_.get_in_dim();
     if (num_heads_ <= 0) {
         spdlog::error("num_heads_ is invalid: {}", num_heads_);
         return;
@@ -198,12 +199,6 @@ void SelfAttn::load_param(const LayerKeyPrefix& key_prefix, const std::string& k
         throw std::runtime_error("QK-Norm weights are partially present under key: " + key);
     }
 
-#ifdef USE_CUDA
-    if (use_qk_norm_) {
-        cuda_supported_ = false;
-        spdlog::warn("SelfAttn CUDA disabled for layer '{}' because QK-Norm is enabled.", key);
-    }
-#endif
 }
 
 Tensor SelfAttn::forward(const Tensor& input, const std::vector<int>& sample_ids, const std::vector<int>* pos_offsets) {
@@ -302,15 +297,18 @@ Tensor SelfAttn::forward_cuda(const Tensor& input,
         cuda_state_ = std::make_unique<cuda::ops::SelfAttnCudaState>();
     }
     cuda::ops::SelfAttnCudaParams params{};
-    params.hidden_dim = hidden_dim_;
+    params.hidden_dim = input_hidden_dim_;
     params.num_heads = num_heads_;
     params.num_heads_kv = num_heads_kv_;
     params.head_dim = head_dim_;
     params.rope_theta = rope_theta_;
+    params.use_qk_norm = use_qk_norm_;
 
     Tensor output = cuda::ops::self_attn_forward_cuda(
         input, sample_ids, offsets, pad_lens_by_sample_, params,
         norm_.weight(),
+        q_norm_.weight(),
+        k_norm_.weight(),
         q_proj_.weights(), q_proj_.bias(),
         k_proj_.weights(), k_proj_.bias(),
         v_proj_.weights(), v_proj_.bias(),

@@ -29,6 +29,7 @@ struct SelfAttnCudaParams {
     int num_heads_kv{0};
     int head_dim{0};
     float rope_theta{10000.0f};
+    bool use_qk_norm{false};
 };
 
 class SelfAttnCudaState {
@@ -59,6 +60,8 @@ private:
         const std::vector<int>& pad_lens_by_sample,
         const SelfAttnCudaParams& params,
         const Tensor& norm_weight,
+        const Tensor& q_norm_weight,
+        const Tensor& k_norm_weight,
         const Tensor& q_weight, const Tensor& q_bias,
         const Tensor& k_weight, const Tensor& k_bias,
         const Tensor& v_weight, const Tensor& v_bias,
@@ -73,6 +76,8 @@ Tensor self_attn_forward_cuda(
     const std::vector<int>& pad_lens_by_sample,
     const SelfAttnCudaParams& params,
     const Tensor& norm_weight,
+    const Tensor& q_norm_weight,
+    const Tensor& k_norm_weight,
     const Tensor& q_weight, const Tensor& q_bias,
     const Tensor& k_weight, const Tensor& k_bias,
     const Tensor& v_weight, const Tensor& v_bias,

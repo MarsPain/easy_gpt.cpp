@@ -29,6 +29,15 @@ Tensor make_tensor(std::mt19937& rng, const std::vector<int>& shape, float scale
     return Tensor(data, shape);
 }
 
+Tensor make_zero_tensor(const std::vector<int>& shape) {
+    int size = 1;
+    for (int dim : shape) {
+        size *= dim;
+    }
+    std::vector<data_type> data(static_cast<size_t>(size), data_type(0.0f));
+    return Tensor(data, shape);
+}
+
 Tensor add_bias(const Tensor& input, const Tensor& bias) {
     Tensor out = input;
     if (out.shape().size() != 3 || bias.shape().size() != 1 || bias.size() != out.shape()[2]) {
@@ -153,7 +162,7 @@ Tensor run_cpu_reference(const Tensor& input,
                          const std::vector<int>& offsets,
                          const std::vector<int>& pad_lens,
                          const cuda::ops::SelfAttnCudaParams& params,
-                         const Tensor& norm_weight,
+                         const Tensor& norm_weight, const Tensor& q_norm_weight, const Tensor& k_norm_weight,
                          const Tensor& q_weight, const Tensor& q_bias,
                          const Tensor& k_weight, const Tensor& k_bias,
                          const Tensor& v_weight, const Tensor& v_bias,
@@ -169,6 +178,10 @@ Tensor run_cpu_reference(const Tensor& input,
     q.split_head(params.num_heads).transpose(1, 2);
     k.split_head(params.num_heads_kv).transpose(1, 2);
     v.split_head(params.num_heads_kv).transpose(1, 2);
+    if (params.use_qk_norm) {
+        q = rms_norm_ref(q, q_norm_weight);
+        k = rms_norm_ref(k, k_norm_weight);
+    }
 
     bool uniform_offset = true;
     for (int i = 1; i < static_cast<int>(offsets.size()); ++i) {
@@ -264,6 +277,7 @@ int main() {
     params.num_heads_kv = 1;
     params.head_dim = 4;
     params.rope_theta = 10000.0f;
+    params.use_qk_norm = false;
 
     const int batch_size = 2;
     const int seq_len = 3;
@@ -281,12 +295,14 @@ int main() {
     Tensor v_bias = make_tensor(rng, {params.num_heads_kv * params.head_dim});
     Tensor o_weight = make_tensor(rng, {params.hidden_dim, params.hidden_dim});
     Tensor o_bias = make_tensor(rng, {params.hidden_dim});
+    Tensor q_norm_weight;
+    Tensor k_norm_weight;
 
     std::vector<Tensor> cpu_cache_k(2);
     std::vector<Tensor> cpu_cache_v(2);
     std::vector<int> cpu_cache_len(2, 0);
     Tensor cpu_out = run_cpu_reference(input, sample_ids, offsets, pad_lens, params,
-                                       norm_weight, q_weight, q_bias, k_weight, k_bias,
+                                       norm_weight, q_norm_weight, k_norm_weight, q_weight, q_bias, k_weight, k_bias,
                                        v_weight, v_bias, o_weight, o_bias,
                                        cpu_cache_k, cpu_cache_v, cpu_cache_len);
 
@@ -294,6 +310,7 @@ int main() {
     cuda_state.init_kv_cache(2);
     Tensor cuda_out = cuda::ops::self_attn_forward_cuda(input, sample_ids, offsets, pad_lens, params,
                                                          norm_weight,
+                                                         q_norm_weight, k_norm_weight,
                                                          q_weight, q_bias,
                                                          k_weight, k_bias,
                                                          v_weight, v_bias,
@@ -315,7 +332,7 @@ int main() {
     std::vector<Tensor> cpu_cache_v_column(2);
     std::vector<int> cpu_cache_len_column(2, 0);
     Tensor cpu_out_column = run_cpu_reference(input, sample_ids, offsets, pad_lens, params,
-                                              norm_weight_column, q_weight, q_bias, k_weight, k_bias,
+                                              norm_weight_column, q_norm_weight, k_norm_weight, q_weight, q_bias, k_weight, k_bias,
                                               v_weight, v_bias, o_weight, o_bias,
                                               cpu_cache_k_column, cpu_cache_v_column, cpu_cache_len_column);
 
@@ -325,6 +342,7 @@ int main() {
     try {
         cuda_out_column = cuda::ops::self_attn_forward_cuda(input, sample_ids, offsets, pad_lens, params,
                                                             norm_weight_column,
+                                                            q_norm_weight, k_norm_weight,
                                                             q_weight, q_bias,
                                                             k_weight, k_bias,
                                                             v_weight, v_bias,
@@ -342,6 +360,122 @@ int main() {
         return 1;
     }
 
+    // Qwen3-style regression: QK-Norm enabled and QKV biases omitted.
+    cuda::ops::SelfAttnCudaParams qwen3_params = params;
+    qwen3_params.hidden_dim = 8;
+    qwen3_params.num_heads = 2;
+    qwen3_params.num_heads_kv = 1;
+    qwen3_params.head_dim = 6;
+    qwen3_params.use_qk_norm = true;
+    Tensor qwen3_q_norm_weight = make_tensor(rng, {qwen3_params.head_dim});
+    Tensor qwen3_k_norm_weight = make_tensor(rng, {qwen3_params.head_dim});
+    Tensor qwen3_q_weight = make_tensor(rng, {qwen3_params.num_heads * qwen3_params.head_dim, qwen3_params.hidden_dim});
+    Tensor qwen3_k_weight = make_tensor(rng, {qwen3_params.num_heads_kv * qwen3_params.head_dim, qwen3_params.hidden_dim});
+    Tensor qwen3_v_weight = make_tensor(rng, {qwen3_params.num_heads_kv * qwen3_params.head_dim, qwen3_params.hidden_dim});
+    Tensor qwen3_o_weight = make_tensor(rng, {qwen3_params.hidden_dim, qwen3_params.num_heads * qwen3_params.head_dim});
+    Tensor qwen3_o_bias = make_tensor(rng, {qwen3_params.hidden_dim});
+    Tensor qwen3_q_bias = make_zero_tensor({qwen3_params.num_heads * qwen3_params.head_dim});
+    Tensor qwen3_k_bias = make_zero_tensor({qwen3_params.num_heads_kv * qwen3_params.head_dim});
+    Tensor qwen3_v_bias = make_zero_tensor({qwen3_params.num_heads_kv * qwen3_params.head_dim});
+
+    std::vector<Tensor> cpu_cache_k_qwen3(2);
+    std::vector<Tensor> cpu_cache_v_qwen3(2);
+    std::vector<int> cpu_cache_len_qwen3(2, 0);
+    cuda::ops::SelfAttnCudaState cuda_state_qwen3;
+    cuda_state_qwen3.init_kv_cache(2);
+
+    std::vector<int> qwen3_sample_ids{0, 1};
+    std::vector<int> qwen3_pad_lens{1, 0};
+    std::vector<int> qwen3_prefill_offsets{-1, 0};
+    Tensor qwen3_prefill_input = make_tensor(rng, {2, 3, qwen3_params.hidden_dim});
+    Tensor cpu_qwen3_prefill = run_cpu_reference(qwen3_prefill_input,
+                                                 qwen3_sample_ids,
+                                                 qwen3_prefill_offsets,
+                                                 qwen3_pad_lens,
+                                                 qwen3_params,
+                                                 norm_weight,
+                                                 qwen3_q_norm_weight,
+                                                 qwen3_k_norm_weight,
+                                                 qwen3_q_weight,
+                                                 qwen3_q_bias,
+                                                 qwen3_k_weight,
+                                                 qwen3_k_bias,
+                                                 qwen3_v_weight,
+                                                 qwen3_v_bias,
+                                                 qwen3_o_weight,
+                                                 qwen3_o_bias,
+                                                 cpu_cache_k_qwen3,
+                                                 cpu_cache_v_qwen3,
+                                                 cpu_cache_len_qwen3);
+    Tensor cuda_qwen3_prefill = cuda::ops::self_attn_forward_cuda(qwen3_prefill_input,
+                                                                  qwen3_sample_ids,
+                                                                  qwen3_prefill_offsets,
+                                                                  qwen3_pad_lens,
+                                                                  qwen3_params,
+                                                                  norm_weight,
+                                                                  qwen3_q_norm_weight,
+                                                                  qwen3_k_norm_weight,
+                                                                  qwen3_q_weight,
+                                                                  qwen3_q_bias,
+                                                                  qwen3_k_weight,
+                                                                  qwen3_k_bias,
+                                                                  qwen3_v_weight,
+                                                                  qwen3_v_bias,
+                                                                  qwen3_o_weight,
+                                                                  qwen3_o_bias,
+                                                                  cuda_state_qwen3);
+    const float qwen3_prefill_diff = max_abs_diff(cpu_qwen3_prefill, cuda_qwen3_prefill);
+    std::cout << "qwen3_prefill_max_abs_diff=" << qwen3_prefill_diff << "\n";
+    if (qwen3_prefill_diff > 9e-2f) {
+        std::cerr << "FAIL: Qwen3-style prefill parity diff too large\n";
+        return 1;
+    }
+
+    Tensor qwen3_decode_input = make_tensor(rng, {2, 1, qwen3_params.hidden_dim});
+    std::vector<int> qwen3_decode_offsets{cpu_cache_len_qwen3[0], cpu_cache_len_qwen3[1]};
+    Tensor cpu_qwen3_decode = run_cpu_reference(qwen3_decode_input,
+                                                qwen3_sample_ids,
+                                                qwen3_decode_offsets,
+                                                qwen3_pad_lens,
+                                                qwen3_params,
+                                                norm_weight,
+                                                qwen3_q_norm_weight,
+                                                qwen3_k_norm_weight,
+                                                qwen3_q_weight,
+                                                qwen3_q_bias,
+                                                qwen3_k_weight,
+                                                qwen3_k_bias,
+                                                qwen3_v_weight,
+                                                qwen3_v_bias,
+                                                qwen3_o_weight,
+                                                qwen3_o_bias,
+                                                cpu_cache_k_qwen3,
+                                                cpu_cache_v_qwen3,
+                                                cpu_cache_len_qwen3);
+    Tensor cuda_qwen3_decode = cuda::ops::self_attn_forward_cuda(qwen3_decode_input,
+                                                                 qwen3_sample_ids,
+                                                                 qwen3_decode_offsets,
+                                                                 qwen3_pad_lens,
+                                                                 qwen3_params,
+                                                                 norm_weight,
+                                                                 qwen3_q_norm_weight,
+                                                                 qwen3_k_norm_weight,
+                                                                 qwen3_q_weight,
+                                                                 qwen3_q_bias,
+                                                                 qwen3_k_weight,
+                                                                 qwen3_k_bias,
+                                                                 qwen3_v_weight,
+                                                                 qwen3_v_bias,
+                                                                 qwen3_o_weight,
+                                                                 qwen3_o_bias,
+                                                                 cuda_state_qwen3);
+    const float qwen3_decode_diff = max_abs_diff(cpu_qwen3_decode, cuda_qwen3_decode);
+    std::cout << "qwen3_decode_max_abs_diff=" << qwen3_decode_diff << "\n";
+    if (qwen3_decode_diff > 9e-2f) {
+        std::cerr << "FAIL: Qwen3-style decode parity diff too large\n";
+        return 1;
+    }
+
     // Performance regression guard (prefill-like): batch=1, seq>1 should select fused prefill attention.
     cuda::ops::SelfAttnCudaState cuda_state_prefill;
     cuda_state_prefill.init_kv_cache(1);
@@ -352,6 +486,7 @@ int main() {
     Tensor prefill_input = make_tensor(rng, {1, 4, params.hidden_dim});
     (void)cuda::ops::self_attn_forward_cuda(prefill_input, prefill_sample_ids, prefill_offsets, prefill_pad_lens, params,
                                             norm_weight,
+                                            q_norm_weight, k_norm_weight,
                                             q_weight, q_bias,
                                             k_weight, k_bias,
                                             v_weight, v_bias,
@@ -377,6 +512,7 @@ int main() {
                                             prefill_batched_pad_lens,
                                             params,
                                             norm_weight,
+                                            q_norm_weight, k_norm_weight,
                                             q_weight, q_bias,
                                             k_weight, k_bias,
                                             v_weight, v_bias,
@@ -406,6 +542,7 @@ int main() {
         std::vector<int> perf_offsets{cuda_state_perf.cache_len(0)};
         (void)cuda::ops::self_attn_forward_cuda(perf_input, perf_sample_ids, perf_offsets, perf_pad_lens, params,
                                                 norm_weight,
+                                                q_norm_weight, k_norm_weight,
                                                 q_weight, q_bias,
                                                 k_weight, k_bias,
                                                 v_weight, v_bias,
@@ -474,6 +611,7 @@ int main() {
                                                 perf_batched_pad_lens,
                                                 params,
                                                 norm_weight,
+                                                q_norm_weight, k_norm_weight,
                                                 q_weight, q_bias,
                                                 k_weight, k_bias,
                                                 v_weight, v_bias,

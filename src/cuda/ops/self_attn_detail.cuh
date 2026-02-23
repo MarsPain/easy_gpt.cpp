@@ -79,10 +79,13 @@ struct DecodeGraphCache {
     int repeat_factor{0};
     int score_capacity{0};
     int pad_size{0};
+    bool use_qk_norm{false};
     const void* cache_k_ptr{nullptr};
     const void* cache_v_ptr{nullptr};
     const int* d_pad_ptr{nullptr};
     const void* d_norm_weight_ptr{nullptr};
+    const void* d_q_norm_weight_ptr{nullptr};
+    const void* d_k_norm_weight_ptr{nullptr};
     const void* q_weight_ptr{nullptr};
     const void* k_weight_ptr{nullptr};
     const void* v_weight_ptr{nullptr};
@@ -113,10 +116,13 @@ struct DecodeGraphCache {
         repeat_factor = 0;
         score_capacity = 0;
         pad_size = 0;
+        use_qk_norm = false;
         cache_k_ptr = nullptr;
         cache_v_ptr = nullptr;
         d_pad_ptr = nullptr;
         d_norm_weight_ptr = nullptr;
+        d_q_norm_weight_ptr = nullptr;
+        d_k_norm_weight_ptr = nullptr;
         q_weight_ptr = nullptr;
         k_weight_ptr = nullptr;
         v_weight_ptr = nullptr;
@@ -141,6 +147,8 @@ struct SelfAttnCudaState::Impl {
     float rope_inv_freq_theta{0.0f};
     ForwardScratchBuffers scratch;
     TensorUploadCache norm_weight_cache;
+    TensorUploadCache q_norm_weight_cache;
+    TensorUploadCache k_norm_weight_cache;
     TensorUploadCache q_bias_cache;
     TensorUploadCache k_bias_cache;
     TensorUploadCache v_bias_cache;
@@ -1222,10 +1230,13 @@ bool can_reuse_decode_graph(const DecodeGraphCache& graph,
                             int repeat_factor,
                             int score_capacity,
                             int pad_size,
+                            bool use_qk_norm,
                             const void* cache_k_ptr,
                             const void* cache_v_ptr,
                             const int* d_pad_ptr,
                             const void* d_norm_weight,
+                            const void* d_q_norm_weight,
+                            const void* d_k_norm_weight,
                             const void* q_weight_ptr,
                             const void* k_weight_ptr,
                             const void* v_weight_ptr,
@@ -1247,10 +1258,13 @@ bool can_reuse_decode_graph(const DecodeGraphCache& graph,
            graph.repeat_factor == repeat_factor &&
            graph.score_capacity == score_capacity &&
            graph.pad_size == pad_size &&
+           graph.use_qk_norm == use_qk_norm &&
            graph.cache_k_ptr == cache_k_ptr &&
            graph.cache_v_ptr == cache_v_ptr &&
            graph.d_pad_ptr == d_pad_ptr &&
            graph.d_norm_weight_ptr == d_norm_weight &&
+           graph.d_q_norm_weight_ptr == d_q_norm_weight &&
+           graph.d_k_norm_weight_ptr == d_k_norm_weight &&
            graph.q_weight_ptr == q_weight_ptr &&
            graph.k_weight_ptr == k_weight_ptr &&
            graph.v_weight_ptr == v_weight_ptr &&
@@ -1274,10 +1288,13 @@ void fill_decode_graph_signature(DecodeGraphCache& graph,
                                  int repeat_factor,
                                  int score_capacity,
                                  int pad_size,
+                                 bool use_qk_norm,
                                  const void* cache_k_ptr,
                                  const void* cache_v_ptr,
                                  const int* d_pad_ptr,
                                  const void* d_norm_weight,
+                                 const void* d_q_norm_weight,
+                                 const void* d_k_norm_weight,
                                  const void* q_weight_ptr,
                                  const void* k_weight_ptr,
                                  const void* v_weight_ptr,
@@ -1298,10 +1315,13 @@ void fill_decode_graph_signature(DecodeGraphCache& graph,
     graph.repeat_factor = repeat_factor;
     graph.score_capacity = score_capacity;
     graph.pad_size = pad_size;
+    graph.use_qk_norm = use_qk_norm;
     graph.cache_k_ptr = cache_k_ptr;
     graph.cache_v_ptr = cache_v_ptr;
     graph.d_pad_ptr = d_pad_ptr;
     graph.d_norm_weight_ptr = d_norm_weight;
+    graph.d_q_norm_weight_ptr = d_q_norm_weight;
+    graph.d_k_norm_weight_ptr = d_k_norm_weight;
     graph.q_weight_ptr = q_weight_ptr;
     graph.k_weight_ptr = k_weight_ptr;
     graph.v_weight_ptr = v_weight_ptr;

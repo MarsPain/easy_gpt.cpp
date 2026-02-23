@@ -49,7 +49,8 @@ private:
                                         const ForwardContext& ctx) const;
     void ensure_cache_capacity(int min_size);
 
-    int hidden_dim_{0};
+    int hidden_dim_{0};       // attention hidden size after q projection (num_heads * head_dim)
+    int input_hidden_dim_{0}; // input hidden size before q/k/v projection
     int num_heads_{0};
     int num_heads_kv_{0};
     int head_dim_{0};

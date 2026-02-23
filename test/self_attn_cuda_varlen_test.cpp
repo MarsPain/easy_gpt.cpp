@@ -29,6 +29,15 @@ Tensor make_tensor(std::mt19937& rng, const std::vector<int>& shape, float scale
     return Tensor(data, shape);
 }
 
+Tensor make_zero_tensor(const std::vector<int>& shape) {
+    int size = 1;
+    for (int dim : shape) {
+        size *= dim;
+    }
+    std::vector<data_type> data(static_cast<size_t>(size), data_type(0.0f));
+    return Tensor(data, shape);
+}
+
 Tensor add_bias(const Tensor& input, const Tensor& bias) {
     Tensor out = input;
     if (out.shape().size() != 3 || bias.shape().size() != 1 || bias.size() != out.shape()[2]) {
@@ -144,7 +153,7 @@ Tensor run_cpu_reference_varlen(
     const std::vector<int>& offsets,
     const std::vector<int>& pad_lens,
     const cuda::ops::SelfAttnCudaParams& params,
-    const Tensor& norm_weight,
+    const Tensor& norm_weight, const Tensor& q_norm_weight, const Tensor& k_norm_weight,
     const Tensor& q_weight, const Tensor& q_bias,
     const Tensor& k_weight, const Tensor& k_bias,
     const Tensor& v_weight, const Tensor& v_bias,
@@ -160,6 +169,10 @@ Tensor run_cpu_reference_varlen(
     q.split_head(params.num_heads).transpose(1, 2);
     k.split_head(params.num_heads_kv).transpose(1, 2);
     v.split_head(params.num_heads_kv).transpose(1, 2);
+    if (params.use_qk_norm) {
+        q = rms_norm_ref(q, q_norm_weight);
+        k = rms_norm_ref(k, k_norm_weight);
+    }
 
     bool uniform_offset = true;
     for (int i = 1; i < static_cast<int>(offsets.size()); ++i) {
@@ -258,21 +271,24 @@ int main() {
     params.hidden_dim = 8;
     params.num_heads = 2;
     params.num_heads_kv = 1;
-    params.head_dim = 4;
+    params.head_dim = 6;
     params.rope_theta = 10000.0f;
+    params.use_qk_norm = true;
 
     const int slot_count = 2;
     const std::vector<int> pad_lens{1, 0};
     const float tolerance = 9e-2f;
 
     Tensor norm_weight = make_tensor(rng, {params.hidden_dim});
-    Tensor q_weight = make_tensor(rng, {params.hidden_dim, params.hidden_dim});
-    Tensor q_bias = make_tensor(rng, {params.hidden_dim});
+    Tensor q_norm_weight = make_tensor(rng, {params.head_dim});
+    Tensor k_norm_weight = make_tensor(rng, {params.head_dim});
+    Tensor q_weight = make_tensor(rng, {params.num_heads * params.head_dim, params.hidden_dim});
+    Tensor q_bias = make_zero_tensor({params.num_heads * params.head_dim});
     Tensor k_weight = make_tensor(rng, {params.num_heads_kv * params.head_dim, params.hidden_dim});
-    Tensor k_bias = make_tensor(rng, {params.num_heads_kv * params.head_dim});
+    Tensor k_bias = make_zero_tensor({params.num_heads_kv * params.head_dim});
     Tensor v_weight = make_tensor(rng, {params.num_heads_kv * params.head_dim, params.hidden_dim});
-    Tensor v_bias = make_tensor(rng, {params.num_heads_kv * params.head_dim});
-    Tensor o_weight = make_tensor(rng, {params.hidden_dim, params.hidden_dim});
+    Tensor v_bias = make_zero_tensor({params.num_heads_kv * params.head_dim});
+    Tensor o_weight = make_tensor(rng, {params.hidden_dim, params.num_heads * params.head_dim});
     Tensor o_bias = make_tensor(rng, {params.hidden_dim});
 
     std::vector<Tensor> cpu_cache_k(slot_count);
@@ -292,6 +308,7 @@ int main() {
                                                   pad_lens,
                                                   params,
                                                   norm_weight,
+                                                  q_norm_weight, k_norm_weight,
                                                   q_weight, q_bias,
                                                   k_weight, k_bias,
                                                   v_weight, v_bias,
@@ -303,6 +320,7 @@ int main() {
                                                             pad_lens,
                                                             params,
                                                             norm_weight,
+                                                            q_norm_weight, k_norm_weight,
                                                             q_weight, q_bias,
                                                             k_weight, k_bias,
                                                             v_weight, v_bias,
@@ -323,6 +341,7 @@ int main() {
                                                         pad_lens,
                                                         params,
                                                         norm_weight,
+                                                        q_norm_weight, k_norm_weight,
                                                         q_weight, q_bias,
                                                         k_weight, k_bias,
                                                         v_weight, v_bias,
@@ -334,6 +353,7 @@ int main() {
                                                                   pad_lens,
                                                                   params,
                                                                   norm_weight,
+                                                                  q_norm_weight, k_norm_weight,
                                                                   q_weight, q_bias,
                                                                   k_weight, k_bias,
                                                                   v_weight, v_bias,
@@ -358,6 +378,7 @@ int main() {
                                                        pad_lens,
                                                        params,
                                                        norm_weight,
+                                                       q_norm_weight, k_norm_weight,
                                                        q_weight, q_bias,
                                                        k_weight, k_bias,
                                                        v_weight, v_bias,
@@ -371,6 +392,7 @@ int main() {
                                                               pad_lens,
                                                               params,
                                                               norm_weight,
+                                                              q_norm_weight, k_norm_weight,
                                                               q_weight, q_bias,
                                                               k_weight, k_bias,
                                                               v_weight, v_bias,
