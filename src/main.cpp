@@ -75,7 +75,7 @@ int main(int argc, char** argv) {
     auto gpt_model = easy_llm::GptModel::create(*config, *data_manager, *model_param);
 
     for (string& prompt : prompts) {
-        prompt = easy_llm::apply_chat_template(prompt);
+        prompt = easy_llm::apply_chat_template(prompt, config->model_type);
     }
 
     if (options.serve) {
@@ -90,7 +90,7 @@ int main(int argc, char** argv) {
             server.submit_prompt(prompt);
         }
 
-        std::thread input_thread([&server]() {
+        std::thread input_thread([&server, &config]() {
             std::string line;
             while (std::getline(std::cin, line)) {
                 if (line == "/quit" || line == ":quit") {
@@ -99,7 +99,7 @@ int main(int argc, char** argv) {
                 if (line.find_first_not_of(" \t\r\n") == std::string::npos) {
                     continue;
                 }
-                std::string templated = easy_llm::apply_chat_template(line);
+                std::string templated = easy_llm::apply_chat_template(line, config->model_type);
                 int request_id = server.submit_prompt(std::move(templated));
                 if (request_id >= 0) {
                     std::cout << "[accepted " << request_id << "]\n";

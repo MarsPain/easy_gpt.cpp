@@ -5,6 +5,8 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <algorithm>
+#include <cctype>
 
 namespace easy_llm {
 namespace {
@@ -16,6 +18,56 @@ std::string trim(const std::string& text) {
     }
     const auto end = text.find_last_not_of(" \t\r\n");
     return text.substr(start, end - start + 1);
+}
+
+std::string to_lower_ascii(std::string text) {
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return text;
+}
+
+bool is_qwen3_model_type(const std::string& model_type) {
+    return to_lower_ascii(model_type).find("qwen3") != std::string::npos;
+}
+
+std::string build_qwen25_chat_template() {
+    return "<|im_start|>system\n"
+           "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n"
+           "<|im_start|>user\n"
+           "{user_query}<|im_end|>\n"
+           "<|im_start|>assistant\n";
+}
+
+std::string build_qwen3_chat_template() {
+    return "<|im_start|>user\n"
+           "{user_query}<|im_end|>\n"
+           "<|im_start|>assistant\n";
+}
+
+bool has_no_think_suffix(const std::string& text) {
+    static const std::string kNoThink = "/no_think";
+    const auto end = text.find_last_not_of(" \t\r\n");
+    if (end == std::string::npos) {
+        return false;
+    }
+    if (end + 1 < kNoThink.size()) {
+        return false;
+    }
+    const std::size_t start = end + 1 - kNoThink.size();
+    return text.compare(start, kNoThink.size(), kNoThink) == 0;
+}
+
+std::string adapt_user_query_for_model(const std::string& user_query, const std::string& model_type) {
+    if (!is_qwen3_model_type(model_type) || has_no_think_suffix(user_query)) {
+        return user_query;
+    }
+    std::string adapted = user_query;
+    if (!adapted.empty() && adapted.back() != '\n') {
+        adapted.push_back('\n');
+    }
+    adapted += "/no_think";
+    return adapted;
 }
 
 }  // namespace
@@ -49,18 +101,19 @@ void print_usage(std::ostream& os) {
 }
 
 std::string apply_chat_template(const std::string& user_query) {
-    static const std::string kChatTemplate =
-        "<|im_start|>system\n"
-        "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n"
-        "<|im_start|>user\n"
-        "{user_query}<|im_end|>\n"
-        "<|im_start|>assistant\n";
-    std::string result = kChatTemplate;
+    return apply_chat_template(user_query, "");
+}
+
+std::string apply_chat_template(const std::string& user_query, const std::string& model_type) {
+    const bool is_qwen3 = is_qwen3_model_type(model_type);
+    const std::string chat_template = is_qwen3 ? build_qwen3_chat_template() : build_qwen25_chat_template();
+    const std::string adapted_user_query = adapt_user_query_for_model(user_query, model_type);
+    std::string result = chat_template;
     const std::string token = "{user_query}";
     size_t pos = 0;
     while ((pos = result.find(token, pos)) != std::string::npos) {
-        result.replace(pos, token.size(), user_query);
-        pos += user_query.size();
+        result.replace(pos, token.size(), adapted_user_query);
+        pos += adapted_user_query.size();
     }
     return result;
 }

@@ -28,5 +28,6 @@ void print_usage(std::ostream& os);
 bool parse_args(int argc, char** argv, CliOptions* options, std::string* error);
 bool read_prompts_file(const std::string& path, std::vector<std::string>* prompts, std::string* error);
 std::string apply_chat_template(const std::string& user_query);
+std::string apply_chat_template(const std::string& user_query, const std::string& model_type);
 
 }  // namespace easy_llm
